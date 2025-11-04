@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Camera + Colored OBJ Airplane</title>
+<style>
+  html,body{
+    height:100%;
+    margin:0;
+    background:#0b0f19;
+    color:#e5e7eb;
+    font:14px/1.4 system-ui;
+  }
+  #wrap{
+    display:grid;
+    place-items:center;
+    height:100%;
+  }
+  #videoContainer{
+    position:relative;
+    width:min(96vw,800px);
+  }
+  #videoContainer video,
+  #videoContainer canvas{
+    width:100%;
+    height:auto;
+    background:#000;
+    border-radius:12px;
+    display:block;
+  }
+  #three{
+    position:absolute;
+    left:0;
+    top:0;
+    opacity:0;
+    transition:opacity .3s;
+    pointer-events:none;
+  }
+  #ui{
+    position:fixed;
+    inset:auto 0 0 0;
+    padding:10px 12px;
+    background:#111827cc;
+    border-top:1px solid #ffffff22;
+  }
+  button,select{
+    background:#1f2937;
+    border:1px solid #ffffff30;
+    color:#fff;
+    border-radius:10px;
+    padding:8px 10px;
+    margin-right:8px;
+  }
+  #log{
+    white-space:pre-wrap;
+    margin-top:8px;
+    font-size:12px;
+    opacity:.9;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="videoContainer">
+    <video id="v" autoplay muted playsinline></video>
+    <canvas id="three"></canvas>
+  </div>
+</div>
+<div id="ui">
+  <button id="start">Start</button>
+  <select id="cams"></select>
+  <button id="refresh">Refresh Devices</button>
+  <div id="log"></div>
+</div>
+
+<!-- Import map so "three" and "three/addons/..." work -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
+import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
+
+/* ------------ DOM + logging ------------ */
+const v         = document.getElementById("v");
+const startBtn  = document.getElementById("start");
+const camsSel   = document.getElementById("cams");
+const refreshBtn= document.getElementById("refresh");
+const logEl     = document.getElementById("log");
+const canvas    = document.getElementById("three");
+const container = document.getElementById("videoContainer");
+
+function log(t){
+  console.log(t);
+  logEl.textContent = String(t);
+}
+
+/* ------------ camera logic ------------ */
+let stream;
+let threeInited = false;
+
+async function stop(){
+  if (stream){
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+}
+
+async function listCams(){
+  try{
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === "videoinput");
+    camsSel.innerHTML = "";
+    cams.forEach((d,i)=>{
+      const opt = document.createElement("option");
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `Camera ${i+1}`;
+      camsSel.appendChild(opt);
+    });
+    if (!cams.length){
+      log("No cameras found.\n• Use HTTPS or localhost\n• Check OS privacy settings\n• Try another browser/device");
+    }
+  }catch(e){
+    log("enumerateDevices error: " + (e.message || e));
+  }
+}
+
+async function start(deviceId=null){
+  try{
+    await stop();
+    const constraints = deviceId
+      ? { video:{ deviceId:{ exact:deviceId }, width:{ ideal:1920 }, height:{ ideal:1080 }}, audio:false }
+      : { video:{ facingMode:{ ideal:"environment" }, width:{ ideal:1920 }, height:{ ideal:1080 }}, audio:false };
+
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    v.srcObject = stream;
+    await v.play();
+
+    const set = stream.getVideoTracks()[0].getSettings();
+    log(`OK: ${set.label || "Camera"} • ${set.width}×${set.height}`);
+
+    await listCams();
+
+    if (!threeInited){
+      initThree();
+      threeInited = true;
+    }
+    canvas.style.opacity = "1";
+  }catch(e){
+    log("Error: " + (e.message || e) + "\n" +
+        "• Serve via https:// or http://localhost\n" +
+        "• Allow permission in the address bar\n" +
+        "• macOS/Windows privacy settings may block Chrome\n" +
+        "• If in an iframe, parent must allow=\"camera\"");
+  }
+}
+
+startBtn.onclick   = () => start(camsSel.value || null);
+refreshBtn.onclick = () => listCams();
+if (!navigator.mediaDevices?.getUserMedia){
+  log("getUserMedia not supported.");
+}
+
+/* ------------ Three.js overlay + colored OBJ ------------ */
+let renderer, scene, camera3D, airplane, fallbackCube;
+
+function initThree(){
+  renderer = new THREE.WebGLRenderer({
+    canvas,
+    alpha:true,
+    antialias:true
+  });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setClearColor(0x000000, 0); // transparent
+
+  scene = new THREE.Scene();
+  camera3D = new THREE.PerspectiveCamera(55, 1, 0.1, 5000);
+  camera3D.position.set(0, 1.5, 6);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+  dir.position.set(4, 8, 6);
+  scene.add(dir);
+
+  const grid = new THREE.GridHelper(20, 20, 0x888888, 0x444444);
+  grid.material.transparent = true;
+  grid.material.opacity = 0.12;
+  grid.position.y = -1;
+  scene.add(grid);
+
+  // Fallback cube: so you always see something even if OBJ/MTL fail
+  const cubeGeom = new THREE.BoxGeometry(1.5,1.5,1.5);
+  const cubeMat  = new THREE.MeshStandardMaterial({
+    color:0x00a2ff, metalness:0.1, roughness:0.4
+  });
+  fallbackCube   = new THREE.Mesh(cubeGeom, cubeMat);
+  scene.add(fallbackCube);
+
+  // Load MTL, then OBJ with those materials
+  const mtlLoader = new MTLLoader();
+  // 🔴 Make sure this name matches the mtllib line in your OBJ exactly:
+  const mtlFileName = "tripo_convert_b4e09b4d-0b02-40ca-80ae-313ca8555cde.mtl";
+
+  log("Loading MTL: " + mtlFileName + " ...");
+
+  mtlLoader.load(
+    mtlFileName,
+    (materials) => {
+      materials.preload();
+      log("MTL loaded. Now loading OBJ with materials...");
+
+      const objLoader = new OBJLoader();
+      objLoader.setMaterials(materials);
+
+      // If you renamed your OBJ, update this filename:
+      const objFileName = "tripo_convert_b4e09b4d-0b02-40ca-80ae-313ca8555cde.obj"; // or your original obj name
+
+      objLoader.load(
+        objFileName,
+        (obj) => {
+          if (fallbackCube){
+            scene.remove(fallbackCube);
+            fallbackCube = null;
+          }
+
+          airplane = obj;
+          centerAndScale(airplane, 3.0);
+          scene.add(airplane);
+          log("OBJ loaded with materials: " + objFileName);
+        },
+        (evt) => {
+          if (evt.total){
+            const pct = (evt.loaded / evt.total * 100).toFixed(1);
+            log("Loading OBJ: " + pct + "%");
+          }
+        },
+        (err) => {
+          log("OBJ load error:\n" + (err?.message || err));
+        }
+      );
+    },
+    (evt) => {
+      if (evt.total){
+        const pct = (evt.loaded / evt.total * 100).toFixed(1);
+        log("Loading MTL: " + pct + "%");
+      }
+    },
+    (err) => {
+      log("MTL load error:\n" + (err?.message || err));
+    }
+  );
+
+  window.addEventListener("resize", resizeRendererToDisplaySize);
+  resizeRendererToDisplaySize();
+  animate();
+}
+
+function centerAndScale(target, desired=3.0){
+  const bbox = new THREE.Box3().setFromObject(target);
+  const size = new THREE.Vector3();
+  bbox.getSize(size);
+  const longest = Math.max(size.x,size.y,size.z) || 1;
+  const scale = desired / longest;
+  target.scale.setScalar(scale);
+
+  const bbox2 = new THREE.Box3().setFromObject(target);
+  const center = new THREE.Vector3();
+  bbox2.getCenter(center);
+  target.position.sub(center);
+  target.position.y += 0.6;
+}
+
+function resizeRendererToDisplaySize(){
+  if (!renderer || !camera3D) return;
+  const width  = container.clientWidth;
+  const height = container.clientHeight || (width * 9/16);
+  renderer.setSize(width, height, false);
+  camera3D.aspect = width / height;
+  camera3D.updateProjectionMatrix();
+}
+
+function animate(){
+  if (!renderer || !scene || !camera3D) return;
+  requestAnimationFrame(animate);
+
+  if (airplane){
+    airplane.rotation.y += 0.01;
+  }else if (fallbackCube){
+    fallbackCube.rotation.y += 0.02;
+    fallbackCube.rotation.x += 0.01;
+  }
+
+  camera3D.lookAt(new THREE.Vector3(0,0.4,0));
+  renderer.render(scene, camera3D);
+}
+
+// initial camera list
+listCams().catch(()=>{});
+</script>
+</body>
+</html>

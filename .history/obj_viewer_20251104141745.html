@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Camera + Your OBJ Airplane</title>
+<style>
+  html,body{
+    height:100%;
+    margin:0;
+    background:#0b0f19;
+    color:#e5e7eb;
+    font:14px/1.4 system-ui;
+  }
+
+  #wrap{
+    display:grid;
+    place-items:center;
+    height:100%;
+  }
+
+  /* Container that stacks video + 3D canvas */
+  #videoContainer{
+    position:relative;
+    width:min(96vw,800px);
+  }
+
+  #videoContainer video,
+  #videoContainer canvas{
+    width:100%;
+    height:auto;
+    background:#000;
+    border-radius:12px;
+    display:block;
+  }
+
+  #three{
+    position:absolute;
+    left:0;
+    top:0;
+    opacity:0;              /* hidden until camera is on */
+    transition:opacity .3s;
+    pointer-events:none;
+  }
+
+  #ui{
+    position:fixed;
+    inset:auto 0 0 0;
+    padding:10px 12px;
+    background:#111827cc;
+    border-top:1px solid #ffffff22;
+  }
+
+  button,select{
+    background:#1f2937;
+    border:1px solid #ffffff30;
+    color:#fff;
+    border-radius:10px;
+    padding:8px 10px;
+    margin-right:8px;
+  }
+
+  #log{
+    white-space:pre-wrap;
+    margin-top:8px;
+    font-size:12px;
+    opacity:.9;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="videoContainer">
+    <video id="v" autoplay muted playsinline></video>
+    <canvas id="three"></canvas>
+  </div>
+</div>
+<div id="ui">
+  <button id="start">Start</button>
+  <select id="cams"></select>
+  <button id="refresh">Refresh Devices</button>
+  <div id="log"></div>
+</div>
+
+<!-- Three.js core -->
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<!-- OBJLoader so we can load your .obj file -->
+<script src="https://unpkg.com/three@0.160.0/examples/js/loaders/OBJLoader.js"></script>
+
+<script>
+/* ------------ CAMERA (smoke test logic) ------------ */
+const v = document.getElementById('v');
+const startBtn = document.getElementById('start');
+const camsSel = document.getElementById('cams');
+const refreshBtn = document.getElementById('refresh');
+const logEl = document.getElementById('log');
+const canvas = document.getElementById('three');
+const container = document.getElementById('videoContainer');
+
+let stream;
+let threeInited = false;
+
+function log(t){
+  console.log(t);
+  logEl.textContent = String(t);
+}
+
+async function stop(){
+  if(stream){
+    stream.getTracks().forEach(t=>t.stop());
+    stream = null;
+  }
+}
+
+async function listCams(){
+  try{
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d=>d.kind === 'videoinput');
+    camsSel.innerHTML = '';
+    cams.forEach((d,i)=>{
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || ('Camera ' + (i+1));
+      camsSel.appendChild(opt);
+    });
+    if (!cams.length){
+      log('No cameras found.\n• Use HTTPS or localhost\n• Check OS privacy settings\n• Try another browser/device');
+    }
+  }catch(e){
+    log('enumerateDevices error: ' + (e.message || e));
+  }
+}
+
+/* Start camera AND show overlay when it's on */
+async function start(deviceId=null){
+  try{
+    await stop();
+    const constraints = deviceId
+      ? {video:{deviceId:{exact:deviceId}, width:{ideal:1920}, height:{ideal:1080}}, audio:false}
+      : {video:{facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080}}, audio:false};
+
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    v.srcObject = stream;
+    await v.play();
+    const set = stream.getVideoTracks()[0].getSettings();
+    log('OK: ' + (set.label || 'Camera') + ' • ' + set.width + '×' + set.height);
+
+    await listCams(); // labels appear after first permission
+
+    if (!threeInited) {
+      initThree();
+      threeInited = true;
+    }
+    canvas.style.opacity = '1';
+  }catch(e){
+    log('Error: ' + (e.message || e) + '\n' +
+        '• Serve via https:// or http://localhost\n' +
+        '• Allow permission in the address bar\n' +
+        '• macOS/Windows privacy settings may block Chrome\n' +
+        '• If in an iframe, parent must allow="camera"');
+  }
+}
+
+startBtn.onclick = ()=> start(camsSel.value || null);
+refreshBtn.onclick = ()=> listCams();
+if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+  log('getUserMedia not supported.');
+}
+
+/* ------------ THREE.JS: OVERLAY + OBJ (with fallback cube) ------------ */
+let renderer, scene, camera3D, airplane, fallbackCube;
+
+function initThree(){
+  if (!window.THREE) {
+    log('THREE.js failed to load.');
+    return;
+  }
+
+  renderer = new THREE.WebGLRenderer({
+    canvas: canvas,
+    alpha: true,
+    antialias: true
+  });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  // Make sure the canvas is transparent, so camera is visible behind
+  renderer.setClearColor(0x000000, 0);
+
+  scene = new THREE.Scene();
+  camera3D = new THREE.PerspectiveCamera(55, 1, 0.1, 5000);
+  camera3D.position.set(0, 1.5, 6);
+
+  // Lights
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+  dir.position.set(4, 8, 6);
+  scene.add(dir);
+
+  // Optional grid
+  const grid = new THREE.GridHelper(20, 20, 0x888888, 0x444444);
+  grid.material.transparent = true;
+  grid.material.opacity = 0.12;
+  grid.position.y = -1;
+  scene.add(grid);
+
+  // 🔹 Fallback cube – so we can see *something* even if OBJ fails
+  const cubeGeom = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+  const cubeMat  = new THREE.MeshStandardMaterial({ color: 0x00a2ff, metalness: 0.1, roughness: 0.4 });
+  fallbackCube   = new THREE.Mesh(cubeGeom, cubeMat);
+  scene.add(fallbackCube);
+
+  log('Loading OBJ: airplane.obj ...');
+
+  // 🔹 Load your OBJ file (must be in same folder)
+  const loader = new THREE.OBJLoader();
+  loader.load(
+    'airplane.obj',
+    function(obj){
+      let meshCount = 0;
+      obj.traverse(function(m){
+        if (m.isMesh){
+          meshCount++;
+          m.material = new THREE.MeshStandardMaterial({
+            color: 0x9ecbff,
+            metalness: 0.2,
+            roughness: 0.45
+          });
+          if (m.geometry && m.geometry.computeVertexNormals){
+            m.geometry.computeVertexNormals();
+          }
+        }
+      });
+      // Remove fallback cube once OBJ is ready
+      if (fallbackCube) {
+        scene.remove(fallbackCube);
+        fallbackCube = null;
+      }
+      airplane = obj;
+      const sizeInfo = centerAndScale(airplane, 3.0);
+      scene.add(airplane);
+      log(
+        'OBJ loaded OK: airplane.obj\n' +
+        'Meshes: ' + meshCount + '\n' +
+        'Size: ' + sizeInfo.size.toArray().map(v=>v.toFixed(2)).join('×')
+      );
+    },
+    function(evt){
+      if (evt.total){
+        var pct = (evt.loaded / evt.total * 100).toFixed(1);
+        log('Loading OBJ: ' + pct + '%');
+      }
+    },
+    function(err){
+      log('OBJ load error:\n' + (err && err.message ? err.message : err));
+    }
+  );
+
+  window.addEventListener('resize', resizeRendererToDisplaySize);
+  resizeRendererToDisplaySize();
+  animate();
+}
+
+function centerAndScale(target, desired){
+  if (desired === undefined) desired = 3.0;
+  var bbox = new THREE.Box3().setFromObject(target);
+  var size = new THREE.Vector3();
+  bbox.getSize(size);
+  var longest = Math.max(size.x, size.y, size.z) || 1;
+  var scale = desired / longest;
+  target.scale.setScalar(scale);
+
+  var bbox2 = new THREE.Box3().setFromObject(target);
+  var center = new THREE.Vector3();
+  bbox2.getCenter(center);
+
+  target.position.sub(center);
+  target.position.y += 0.6;
+  return { size, center };
+}
+
+function resizeRendererToDisplaySize() {
+  if (!renderer || !camera3D) return;
+  var width = container.clientWidth;
+  var height = container.clientHeight || (width * 9 / 16);
+  renderer.setSize(width, height, false);
+  camera3D.aspect = width / height;
+  camera3D.updateProjectionMatrix();
+}
+
+function animate() {
+  if (!renderer || !scene || !camera3D) return;
+  requestAnimationFrame(animate);
+
+  if (airplane) {
+    airplane.rotation.y += 0.01;
+  } else if (fallbackCube) {
+    fallbackCube.rotation.y += 0.02;
+    fallbackCube.rotation.x += 0.01;
+  }
+
+  camera3D.lookAt(new THREE.Vector3(0, 0.4, 0));
+  renderer.render(scene, camera3D);
+}
+
+// Try to list cameras when page loads
+listCams().catch(function(){});
+</script>
+</body>
+</html>

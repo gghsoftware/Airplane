@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Camera + AR-capable Airplane</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #000;
+    color: #e5e7eb;
+    font: 14px/1.4 system-ui;
+  }
+  #wrap {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+  }
+  #videoContainer {
+    position: relative;
+    width: 100%;
+    height: 100%;
+  }
+  #videoContainer video,
+  #videoContainer canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    border-radius: 0;
+  }
+  #videoContainer video {
+    background: #000;
+  }
+  #videoContainer canvas {
+    background: transparent;
+  }
+  #ui {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px calc(env(safe-area-inset-bottom, 0px) + 8px);
+    background: #111827cc;
+    border-top: 1px solid #ffffff22;
+    backdrop-filter: blur(10px);
+    z-index: 10;
+  }
+  button,
+  select {
+    background: #1f2937;
+    border: 1px solid #ffffff30;
+    color: #fff;
+    border-radius: 999px;
+    padding: 8px 12px;
+    margin: 0;
+    font-size: 13px;
+  }
+  @media (max-width: 600px) {
+    #ui {
+      font-size: 12px;
+    }
+    button,
+    select {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+  }
+  #log {
+    white-space: pre-wrap;
+    margin-top: 4px;
+    font-size: 11px;
+    opacity: 0.9;
+    flex-basis: 100%;
+    max-height: 4.5em;
+    overflow-y: auto;
+  }
+  #three {
+    opacity: 0;
+    transition: opacity .3s;
+    pointer-events: auto; /* needed for orbit controls */
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="videoContainer">
+    <video id="v" autoplay muted playsinline></video>
+    <canvas id="three"></canvas>
+  </div>
+</div>
+<div id="ui">
+  <button id="start">Start</button>
+  <select id="cams"></select>
+  <button id="refresh">Refresh Devices</button>
+  <div id="log"></div>
+</div>
+
+<!-- Import map for three + addons + webxr -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+    "three/addons/webxr/": "https://unpkg.com/three@0.160.0/examples/jsm/webxr/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
+import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { ARButton } from "three/addons/webxr/ARButton.js";
+
+/* ---------- DOM + logging ---------- */
+const v         = document.getElementById("v");
+const startBtn  = document.getElementById("start");
+const camsSel   = document.getElementById("cams");
+const refreshBtn= document.getElementById("refresh");
+const logEl     = document.getElementById("log");
+const canvas    = document.getElementById("three");
+const container = document.getElementById("videoContainer");
+
+function log(t){
+  console.log(t);
+  logEl.textContent = String(t);
+}
+
+/* ---------- camera overlay mode (fallback) ---------- */
+let stream;
+let threeInited = false;
+let xrSupported = false;
+
+async function stopStream(){
+  if (stream){
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+}
+
+async function listCams(){
+  try{
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cams = devices.filter(d => d.kind === "videoinput");
+    camsSel.innerHTML = "";
+    cams.forEach((d,i)=>{
+      const opt = document.createElement("option");
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `Camera ${i+1}`;
+      camsSel.appendChild(opt);
+    });
+    if (!cams.length){
+      log("No cameras found.\n• Use HTTPS or localhost\n• Check OS privacy settings\n• Try another browser/device");
+    }
+  }catch(e){
+    log("enumerateDevices error: " + (e.message || e));
+  }
+}
+
+async function startCamera(deviceId=null){
+  try{
+    if (xrSupported){
+      log("WebXR AR is available. Use the 'Enter AR' button for true AR.\nCamera overlay mode still works as before.");
+    }
+    await stopStream();
+    const constraints = deviceId
+      ? { video:{ deviceId:{ exact:deviceId }, width:{ ideal:1920 }, height:{ ideal:1080 }}, audio:false }
+      : { video:{ facingMode:{ ideal:"environment" }, width:{ ideal:1920 }, height:{ ideal:1080 }}, audio:false };
+
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    v.srcObject = stream;
+    await v.play();
+
+    const set = stream.getVideoTracks()[0].getSettings();
+    log(`OK: ${set.label || "Camera"} • ${set.width}×${set.height}`);
+
+    await listCams();
+
+    if (!threeInited){
+      initThree();
+      threeInited = true;
+    }
+    canvas.style.opacity = "1";
+  }catch(e){
+    log("Error: " + (e.message || e) + "\n" +
+        "• Serve via https:// or http://localhost\n" +
+        "• Allow permission in the address bar\n" +
+        "• macOS/Windows privacy settings may block Chrome\n" +
+        "• If in an iframe, parent must allow=\"camera\"");
+  }
+}
+
+startBtn.onclick   = () => startCamera(camsSel.value || null);
+refreshBtn.onclick = () => listCams();
+if (!navigator.mediaDevices?.getUserMedia){
+  log("getUserMedia not supported.");
+}
+
+/* ---------- Three.js + OBJ + OrbitControls + AR ---------- */
+let renderer, scene, camera3D, airplane, fallbackCube, controls;
+
+function initThree(){
+  renderer = new THREE.WebGLRenderer({
+    canvas,
+    alpha:true,
+    antialias:true
+  });
+  renderer.xr.enabled = true;                 // allow XR (AR) mode
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setClearColor(0x000000, 0);       // transparent over video
+
+  scene = new THREE.Scene();
+  camera3D = new THREE.PerspectiveCamera(55, 1, 0.1, 5000);
+  camera3D.position.set(0, 1.5, 6);
+
+  // Orbit controls for drag rotation (fallback / non-AR)
+  controls = new OrbitControls(camera3D, renderer.domElement);
+  controls.enableDamping = true;
+  controls.enablePan = false;
+  controls.enableZoom = false;
+  controls.rotateSpeed = 0.9;
+  controls.target.set(0, 0.4, 0);
+  controls.update();
+
+  // Lights
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+  dir.position.set(4, 8, 6);
+  scene.add(dir);
+
+  // Optional grid
+  const grid = new THREE.GridHelper(20, 20, 0x888888, 0x444444);
+  grid.material.transparent = true;
+  grid.material.opacity = 0.12;
+  grid.position.y = -1;
+  scene.add(grid);
+
+  // Fallback cube while OBJ loads / if fails
+  const cubeGeom = new THREE.BoxGeometry(2,2,2);
+  const cubeMat  = new THREE.MeshStandardMaterial({ color:0x00a2ff, metalness:0.1, roughness:0.4 });
+  fallbackCube   = new THREE.Mesh(cubeGeom, cubeMat);
+  scene.add(fallbackCube);
+
+  // Load MTL + OBJ with materials
+  const mtlLoader = new MTLLoader();
+  const mtlFileName = "tripo_convert_b4e09b4d-0b02-40ca-80ae-313ca8555cde.mtl"; // change if needed
+  log("Loading MTL: " + mtlFileName + " ...");
+
+  mtlLoader.load(
+    mtlFileName,
+    (materials) => {
+      materials.preload();
+      log("MTL loaded. Now loading OBJ with materials...");
+
+      const objLoader = new OBJLoader();
+      objLoader.setMaterials(materials);
+      const objFileName = "airplane.obj"; // change if your OBJ is named differently
+
+      objLoader.load(
+        objFileName,
+        (obj) => {
+          if (fallbackCube){
+            scene.remove(fallbackCube);
+            fallbackCube = null;
+          }
+          airplane = obj;
+          // make it big
+          centerAndScale(airplane, 8.0);
+          scene.add(airplane);
+          log("OBJ loaded with materials: " + objFileName);
+        },
+        (evt) => {
+          if (evt.total){
+            const pct = (evt.loaded / evt.total * 100).toFixed(1);
+            log("Loading OBJ: " + pct + "%");
+          }
+        },
+        (err) => {
+          log("OBJ load error:\n" + (err?.message || err));
+        }
+      );
+    },
+    (evt) => {
+      if (evt.total){
+        const pct = (evt.loaded / evt.total * 100).toFixed(1);
+        log("Loading MTL: " + pct + "%");
+      }
+    },
+    (err) => {
+      log("MTL load error:\n" + (err?.message || err));
+    }
+  );
+
+  // Check for WebXR AR support and add AR button if available
+  if (navigator.xr && navigator.xr.isSessionSupported){
+    navigator.xr.isSessionSupported("immersive-ar").then((supported) => {
+      xrSupported = supported;
+      if (supported){
+        const arButton = ARButton.createButton(renderer, {
+          requiredFeatures: ["local-floor"]
+        });
+        arButton.style.position = "fixed";
+        arButton.style.right    = "12px";
+        arButton.style.bottom   = "72px";
+        arButton.style.zIndex   = "20";
+        document.body.appendChild(arButton);
+        log("AR available: tap 'Enter AR' for true AR view. Or use Start for camera overlay.");
+      } else {
+        log("WebXR AR not supported; using camera overlay mode.");
+      }
+    }).catch((e)=>{
+      log("XR check error: " + (e.message || e));
+    });
+  } else {
+    log("navigator.xr not available; using camera overlay mode.");
+  }
+
+  renderer.setAnimationLoop(animate);  // works for both normal + XR
+  window.addEventListener("resize", resizeRendererToDisplaySize);
+  resizeRendererToDisplaySize();
+}
+
+/* ---------- helpers ---------- */
+function centerAndScale(target, desired = 8.0){
+  const bbox = new THREE.Box3().setFromObject(target);
+  const size = new THREE.Vector3();
+  bbox.getSize(size);
+  const longest = Math.max(size.x,size.y,size.z) || 1;
+  const scale = desired / longest;
+  target.scale.setScalar(scale);
+
+  const bbox2 = new THREE.Box3().setFromObject(target);
+  const center = new THREE.Vector3();
+  bbox2.getCenter(center);
+  target.position.sub(center);
+  target.position.y += 0.6;
+}
+
+function resizeRendererToDisplaySize(){
+  if (!renderer || !camera3D) return;
+  const width  = container.clientWidth;
+  const height = container.clientHeight || (width * 9/16);
+  renderer.setSize(width, height, false);
+  camera3D.aspect = width / height;
+  camera3D.updateProjectionMatrix();
+}
+
+function animate(time, frame){
+  // In non-AR mode, OrbitControls handles drag rotation
+  if (controls && !renderer.xr.isPresenting){
+    controls.update();
+  }
+  if (!airplane && fallbackCube){
+    fallbackCube.rotation.y += 0.02;
+    fallbackCube.rotation.x += 0.01;
+  }
+  renderer.render(scene, camera3D);
+}
+
+/* initial camera list */
+listCams().catch(()=>{});
+</script>
+</body>
+</html>
