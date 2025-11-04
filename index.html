@@ -17,6 +17,7 @@
     position: relative;
     width: 100vw;
     height: 100vh;
+    height: 100dvh; /* better on mobile with dynamic bars */
     overflow: hidden;
   }
   #videoContainer {
@@ -87,7 +88,7 @@
   #three {
     opacity: 0;
     transition: opacity .3s;
-    pointer-events: auto; /* needed for orbit controls */
+    pointer-events: auto; /* needed for orbit controls + pinch zoom */
   }
 </style>
 </head>
@@ -221,17 +222,31 @@ function initThree(){
   renderer.setClearColor(0x000000, 0);       // transparent over video
 
   scene = new THREE.Scene();
-  camera3D = new THREE.PerspectiveCamera(55, 1, 0.1, 5000);
-  camera3D.position.set(0, 1.5, 6);
 
-  // Orbit controls for drag rotation (fallback / non-AR)
-  controls = new OrbitControls(camera3D, renderer.domElement);
-  controls.enableDamping = true;
-  controls.enablePan = false;
-  controls.enableZoom = false;
-  controls.rotateSpeed = 0.9;
-  controls.target.set(0, 0.4, 0);
-  controls.update();
+  // responsive camera settings
+  const isMobile = window.matchMedia("(max-width: 600px)").matches;
+  camera3D = new THREE.PerspectiveCamera(55, 1, 0.1, 5000);
+  const camY = isMobile ? 1.2 : 1.5;
+  const camZ = isMobile ? 5.0 : 6.0;
+  camera3D.position.set(0, camY, camZ);
+
+
+controls = new OrbitControls(camera3D, renderer.domElement);
+controls.enableDamping = true;
+controls.enablePan = false;
+
+// 🔹 easier zoom: closer min, tighter max, faster speed
+controls.enableZoom   = true;
+controls.minDistance  = 0.5;          // was 3
+controls.maxDistance  = 8;            // was 15
+controls.zoomSpeed    = isMobile ? 2.0 : 1.5;  // was 0.7 / 1.0
+
+// rotation
+controls.rotateSpeed = isMobile ? 0.8 : 1.0;
+
+controls.target.set(0, 0.4, 0);
+controls.update();
+
 
   // Lights
   scene.add(new THREE.AmbientLight(0xffffff, 0.7));
@@ -275,8 +290,12 @@ function initThree(){
             fallbackCube = null;
           }
           airplane = obj;
-          // make it big
-          centerAndScale(airplane, 8.0);
+
+          // responsive size: slightly smaller on phones
+          const isMobileInner = window.matchMedia("(max-width: 600px)").matches;
+          const desiredSize = isMobileInner ? 6.0 : 8.0;
+          centerAndScale(airplane, desiredSize, isMobileInner);
+
           scene.add(airplane);
           log("OBJ loaded with materials: " + objFileName);
         },
@@ -332,7 +351,7 @@ function initThree(){
 }
 
 /* ---------- helpers ---------- */
-function centerAndScale(target, desired = 8.0){
+function centerAndScale(target, desired = 8.0, isMobile = false){
   const bbox = new THREE.Box3().setFromObject(target);
   const size = new THREE.Vector3();
   bbox.getSize(size);
@@ -344,7 +363,9 @@ function centerAndScale(target, desired = 8.0){
   const center = new THREE.Vector3();
   bbox2.getCenter(center);
   target.position.sub(center);
-  target.position.y += 0.6;
+
+  // keep model a bit higher on mobile so UI bar doesn't cover it
+  target.position.y += isMobile ? 0.3 : 0.6;
 }
 
 function resizeRendererToDisplaySize(){
@@ -357,7 +378,7 @@ function resizeRendererToDisplaySize(){
 }
 
 function animate(time, frame){
-  // In non-AR mode, OrbitControls handles drag rotation
+  // In non-AR mode, OrbitControls handles drag + zoom
   if (controls && !renderer.xr.isPresenting){
     controls.update();
   }
